@@ -64,11 +64,41 @@ export function fmtTime(t: string): string {
   return `${hour}:${pad(m)} ${suffix}`;
 }
 
-export function rangesOverlap(
-  aStart: string,
-  aEnd: string,
-  bStart: string,
-  bEnd: string,
-): boolean {
-  return timeToMinutes(aStart) < timeToMinutes(bEnd) && timeToMinutes(bStart) < timeToMinutes(aEnd);
+export function fmtTimeRange(start: string, end: string): string {
+  return `${fmtTime(start)}–${fmtTime(end)}`;
+}
+
+/** Length of a shift in minutes; end <= start means it ends the next day. */
+export function durationMinutes(start: string, end: string): number {
+  const s = timeToMinutes(start);
+  const e = timeToMinutes(end);
+  return e > s ? e - s : e + 1440 - s;
+}
+
+export function shiftHours(start: string, end: string): number {
+  return durationMinutes(start, end) / 60;
+}
+
+/** Minutes since the Unix epoch for a local date + time, ignoring DST shifts. */
+export function absMinutes(date: string, time: string): number {
+  const [y, m, d] = date.split("-").map(Number);
+  return Date.UTC(y, m - 1, d) / 60000 + timeToMinutes(time);
+}
+
+/** A ratio multiplier, up to 5 decimals, no trailing zeros: 0.92345 -> "0.92345", 1.5 -> "1.5". */
+export function fmtRatio(r: number): string {
+  return String(Math.round(r * 100000) / 100000);
+}
+
+/**
+ * Truncates (never rounds) to 2 decimals: 7.3876 -> 7.38, 7.389 -> 7.38.
+ * The tiny epsilon stops float noise from dropping a cent, e.g. 4.35 * 100 = 434.99999999999994.
+ */
+export function trunc2(n: number): number {
+  return Math.trunc(n * 100 + 1e-9) / 100;
+}
+
+/** Hours for display: truncated to 2 decimals, no trailing zeros ("12", "13.5", "7.38"). */
+export function fmtHours(h: number): string {
+  return String(trunc2(h));
 }

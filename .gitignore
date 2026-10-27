@@ -44,3 +44,6 @@ next-env.d.ts
 # claude code local config
 .claude/launch.json
 .claude/settings.local.json
+
+# generated sample/test data
+sample-data/

@@ -3,8 +3,7 @@ import { ScheduleBoard } from "@/components/ScheduleBoard";
 import { getScheduleData } from "@/lib/data";
 
 async function Board() {
-  const { doctors, shifts } = await getScheduleData();
-  return <ScheduleBoard doctors={doctors} shifts={shifts} />;
+  return <ScheduleBoard {...(await getScheduleData())} />;
 }
 
 export default function Page() {

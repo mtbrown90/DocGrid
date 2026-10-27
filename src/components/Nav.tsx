@@ -7,6 +7,7 @@ import { signOut } from "@/app/actions";
 const LINKS = [
   { href: "/", label: "Schedule" },
   { href: "/doctors", label: "Doctors" },
+  { href: "/setup", label: "Setup" },
 ];
 
 export function Nav() {
@@ -25,9 +26,7 @@ export function Nav() {
                 href={href}
                 aria-current={active ? "page" : undefined}
                 className={`rounded-md px-3 py-1.5 text-sm font-medium ${
-                  active
-                    ? "bg-foreground text-background"
-                    : "hover:bg-black/5 dark:hover:bg-white/10"
+                  active ? "bg-foreground text-background" : "hover:bg-black/5 dark:hover:bg-white/10"
                 }`}
               >
                 {label}

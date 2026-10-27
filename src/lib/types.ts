@@ -1,35 +1,68 @@
-export type ShiftKind = "clinic" | "on-call" | "time-off";
+export type ShiftKind = "work" | "time-off";
 
-export const SHIFT_KINDS: { value: ShiftKind; label: string }[] = [
-  { value: "clinic", label: "Clinic" },
-  { value: "on-call", label: "On call" },
-  { value: "time-off", label: "Time off" },
-];
+export interface Location {
+  id: string;
+  name: string;
+}
+
+/** A reusable named shift at a location. end <= start means it runs overnight. */
+export interface ShiftType {
+  id: string;
+  name: string;
+  locationId: string;
+  start: string;
+  end: string;
+  /** Multiplier applied to raw hours to get ratio hours. */
+  ratio: number;
+  isNight: boolean;
+  isCall: boolean;
+}
 
 export interface Doctor {
   id: string;
+  /** Staff-assigned ID, unique across doctors. */
+  employeeId: string;
   name: string;
   specialty: string;
   /** Index into the DOCTOR_COLORS palette. */
   color: number;
+  phone: string;
+  email: string;
+  address: string;
+  isNocturnist: boolean;
 }
 
 export interface Shift {
   id: string;
   doctorId: string;
-  /** Local calendar date, YYYY-MM-DD. */
+  /** Local calendar date the shift starts on, YYYY-MM-DD. */
   date: string;
-  /** 24h time, HH:MM. */
+  /** 24h time, HH:MM. If end <= start the shift ends the next day. */
   start: string;
   end: string;
   kind: ShiftKind;
-  location: string;
+  /** Null for time off, or when the shift type was later deleted. */
+  shiftTypeId: string | null;
+  locationId: string | null;
+  /** Copied from the shift type when scheduled, so later edits don't rewrite history. */
+  name: string;
+  ratio: number;
   notes: string;
+}
+
+/** A doctor's preferred share (0-100) of their shifts at one location. */
+export interface LocationPref {
+  doctorId: string;
+  locationId: string;
+  percent: number;
 }
 
 export interface ScheduleData {
   doctors: Doctor[];
   shifts: Shift[];
+  locations: Location[];
+  shiftTypes: ShiftType[];
+  prefs: LocationPref[];
 }
 
 // Static class names so Tailwind can see them at build time.

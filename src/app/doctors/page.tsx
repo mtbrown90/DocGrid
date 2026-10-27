@@ -3,8 +3,8 @@ import { DoctorsManager } from "@/components/DoctorsManager";
 import { getScheduleData } from "@/lib/data";
 
 async function Doctors() {
-  const { doctors, shifts } = await getScheduleData();
-  return <DoctorsManager doctors={doctors} shifts={shifts} />;
+  const { doctors, shifts, locations, prefs } = await getScheduleData();
+  return <DoctorsManager doctors={doctors} shifts={shifts} locations={locations} prefs={prefs} />;
 }
 
 export default function Page() {

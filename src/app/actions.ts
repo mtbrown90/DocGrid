@@ -2,17 +2,28 @@
 
 import { revalidatePath } from "next/cache";
 import { redirect } from "next/navigation";
+import { parseDoctorWorkbook, type ParsedDoctor } from "@/lib/excel";
 import { createClient } from "@/lib/supabase/server";
-import type { Shift } from "@/lib/types";
+import type { Doctor, Shift, ShiftType } from "@/lib/types";
 
 export type ActionResult = { error?: string };
 
 type ShiftDraft = Omit<Shift, "id">;
+export type DoctorInput = Omit<Doctor, "id" | "color">;
+export type ShiftTypeInput = Omit<ShiftType, "id">;
 
 function fail(error: { code?: string; message: string }): ActionResult {
-  // 23P01 = exclusion_violation from the shifts_no_overlap constraint.
-  if (error.code === "23P01") return { error: "That overlaps another shift for this doctor." };
-  return { error: error.message };
+  switch (error.code) {
+    case "23P01": // exclusion_violation from shifts_no_overlap
+      return { error: "That overlaps another shift for this doctor." };
+    case "23505": // unique_violation
+      return { error: "That ID or name is already in use." };
+    case "23503": // foreign_key_violation
+    case "23001": // restrict_violation
+      return { error: "This is still in use. Remove the things that use it first." };
+    default:
+      return { error: error.message };
+  }
 }
 
 function done(): ActionResult {
@@ -20,25 +31,30 @@ function done(): ActionResult {
   return {};
 }
 
-const toRow = (s: ShiftDraft) => ({
+// Shifts ----------------------------------------------------------------------
+
+const shiftRow = (s: ShiftDraft) => ({
   doctor_id: s.doctorId,
   shift_date: s.date,
   start_time: s.start,
   end_time: s.end,
   kind: s.kind,
-  location: s.location,
+  shift_type_id: s.shiftTypeId,
+  location_id: s.locationId,
+  name: s.name,
+  ratio: s.ratio,
   notes: s.notes,
 });
 
 export async function addShifts(drafts: ShiftDraft[]): Promise<ActionResult> {
   const supabase = await createClient();
-  const { error } = await supabase.from("shifts").insert(drafts.map(toRow));
+  const { error } = await supabase.from("shifts").insert(drafts.map(shiftRow));
   return error ? fail(error) : done();
 }
 
 export async function updateShift(id: string, draft: ShiftDraft): Promise<ActionResult> {
   const supabase = await createClient();
-  const { error } = await supabase.from("shifts").update(toRow(draft)).eq("id", id);
+  const { error } = await supabase.from("shifts").update(shiftRow(draft)).eq("id", id);
   return error ? fail(error) : done();
 }
 
@@ -48,19 +64,185 @@ export async function removeShift(id: string): Promise<ActionResult> {
   return error ? fail(error) : done();
 }
 
-export async function addDoctor(name: string, specialty: string): Promise<ActionResult> {
+// Doctors ---------------------------------------------------------------------
+
+const doctorRow = (d: DoctorInput) => ({
+  employee_id: d.employeeId.trim() || null,
+  name: d.name.trim(),
+  specialty: d.specialty.trim() || "General",
+  phone: d.phone.trim(),
+  email: d.email.trim(),
+  address: d.address.trim(),
+  is_nocturnist: d.isNocturnist,
+});
+
+/** Location id -> percent. Zero or missing means no preference for that location. */
+export type PrefInput = Record<string, number>;
+
+type Supabase = Awaited<ReturnType<typeof createClient>>;
+
+async function replacePrefs(supabase: Supabase, doctorId: string, prefs: PrefInput) {
+  const { error: delError } = await supabase.from("doctor_location_prefs").delete().eq("doctor_id", doctorId);
+  if (delError) return delError;
+  const rows = Object.entries(prefs)
+    .filter(([, percent]) => percent > 0)
+    .map(([location_id, percent]) => ({ doctor_id: doctorId, location_id, percent }));
+  if (rows.length === 0) return null;
+  const { error } = await supabase.from("doctor_location_prefs").insert(rows);
+  return error;
+}
+
+function prefsProblem(prefs: PrefInput): string | null {
+  const values = Object.values(prefs).filter((p) => p > 0);
+  if (values.some((p) => p > 100)) return "A location percentage can't be more than 100.";
+  const total = values.reduce((a, b) => a + b, 0);
+  return values.length > 0 && Math.abs(total - 100) > 0.01
+    ? `Location percentages add up to ${Math.round(total * 100) / 100}, not 100.`
+    : null;
+}
+
+export async function addDoctor(input: DoctorInput, prefs: PrefInput): Promise<ActionResult> {
+  const problem = prefsProblem(prefs);
+  if (problem) return { error: problem };
+
   const supabase = await createClient();
   const { count, error: countError } = await supabase
     .from("doctors")
     .select("id", { count: "exact", head: true });
   if (countError) return fail(countError);
 
-  const { error } = await supabase.from("doctors").insert({
-    name: name.trim(),
-    specialty: specialty.trim() || "General",
-    color: (count ?? 0) % 6,
-  });
-  return error ? fail(error) : done();
+  const { data, error } = await supabase
+    .from("doctors")
+    .insert({ ...doctorRow(input), color: (count ?? 0) % 6 })
+    .select("id")
+    .single();
+  if (error) return fail(error);
+
+  const prefError = await replacePrefs(supabase, data.id, prefs);
+  return prefError ? fail(prefError) : done();
+}
+
+export async function updateDoctor(id: string, input: DoctorInput, prefs: PrefInput): Promise<ActionResult> {
+  const problem = prefsProblem(prefs);
+  if (problem) return { error: problem };
+
+  const supabase = await createClient();
+  const { error } = await supabase.from("doctors").update(doctorRow(input)).eq("id", id);
+  if (error) return fail(error);
+
+  const prefError = await replacePrefs(supabase, id, prefs);
+  return prefError ? fail(prefError) : done();
+}
+
+// Excel import ------------------------------------------------------------------
+
+export type ImportResult = {
+  /** A single problem with the request or the file as a whole. */
+  error?: string;
+  /** Per-row problems; when present, nothing was imported. */
+  errors?: string[];
+  summary?: { created: number; updated: number; locationsCreated: number };
+};
+
+const MAX_UPLOAD_BYTES = 1_000_000;
+
+function chunk<T>(items: T[], size: number): T[][] {
+  const out: T[][] = [];
+  for (let i = 0; i < items.length; i += size) out.push(items.slice(i, i + size));
+  return out;
+}
+
+export async function importDoctors(formData: FormData): Promise<ImportResult> {
+  const file = formData.get("file");
+  if (!(file instanceof File) || file.size === 0) return { error: "Choose an .xlsx file first." };
+  if (!file.name.toLowerCase().endsWith(".xlsx")) {
+    return { error: "Only .xlsx files are supported. In Excel, use Save As → Excel Workbook." };
+  }
+  if (file.size > MAX_UPLOAD_BYTES) return { error: "That file is too large (limit 1 MB)." };
+
+  let parsed;
+  try {
+    parsed = await parseDoctorWorkbook(await file.arrayBuffer());
+  } catch {
+    return { error: "Couldn't read that file. Is it a valid .xlsx workbook?" };
+  }
+  if (parsed.errors.length > 0) return { errors: parsed.errors };
+
+  const supabase = await createClient();
+
+  // 1. Locations: create any the file mentions that don't exist yet.
+  const { data: existingLocations, error: locError } = await supabase.from("locations").select("id, name");
+  if (locError) return { error: locError.message };
+  const locationIds = new Map(existingLocations.map((l) => [l.name.toLowerCase(), l.id as string]));
+
+  const missing = parsed.locations.filter((n) => !locationIds.has(n.toLowerCase()));
+  if (missing.length > 0) {
+    const { data: created, error } = await supabase.from("locations").insert(missing.map((name) => ({ name }))).select("id, name");
+    if (error) return { error: error.message };
+    for (const l of created) locationIds.set(l.name.toLowerCase(), l.id);
+  }
+
+  // 2. Doctors: update the ones whose ID already exists, insert the rest.
+  const { data: existingDoctors, error: docError } = await supabase.from("doctors").select("id, employee_id");
+  if (docError) return { error: docError.message };
+  const doctorIds = new Map(
+    existingDoctors.filter((d) => d.employee_id).map((d) => [String(d.employee_id).toLowerCase(), d.id as string]),
+  );
+
+  let nextColor = existingDoctors.length;
+  const toInsert: { parsed: ParsedDoctor; row: ReturnType<typeof doctorRow> & { color: number } }[] = [];
+  let updated = 0;
+  const finalIds = new Map<string, string>(); // lowercase employee id -> doctor uuid
+
+  for (const d of parsed.doctors) {
+    const row = doctorRow({
+      employeeId: d.employeeId,
+      name: d.name,
+      specialty: d.specialty,
+      phone: d.phone,
+      email: d.email,
+      address: d.address,
+      isNocturnist: d.isNocturnist,
+    });
+    const existingId = doctorIds.get(d.employeeId.toLowerCase());
+    if (existingId) {
+      const { error } = await supabase.from("doctors").update(row).eq("id", existingId);
+      if (error) return { error: `Stopped at ${d.employeeId}: ${fail(error).error}` };
+      finalIds.set(d.employeeId.toLowerCase(), existingId);
+      updated++;
+    } else {
+      toInsert.push({ parsed: d, row: { ...row, color: nextColor++ % 6 } });
+    }
+  }
+
+  for (const batch of chunk(toInsert, 100)) {
+    const { data, error } = await supabase.from("doctors").insert(batch.map((b) => b.row)).select("id, employee_id");
+    if (error) return { error: `Some doctors were not imported: ${fail(error).error}` };
+    for (const d of data) finalIds.set(String(d.employee_id).toLowerCase(), d.id);
+  }
+
+  // 3. Preferences: only touched when the file has "% <Location>" columns.
+  if (parsed.hasPrefColumns) {
+    const ids = [...finalIds.values()];
+    for (const batch of chunk(ids, 50)) {
+      const { error } = await supabase.from("doctor_location_prefs").delete().in("doctor_id", batch);
+      if (error) return { error: `Doctors were saved but preferences were not: ${error.message}` };
+    }
+    const rows = parsed.doctors.flatMap((d) =>
+      d.prefs.map((p) => ({
+        doctor_id: finalIds.get(d.employeeId.toLowerCase())!,
+        location_id: locationIds.get(p.location.toLowerCase())!,
+        percent: p.percent,
+      })),
+    );
+    for (const batch of chunk(rows, 200)) {
+      const { error } = await supabase.from("doctor_location_prefs").insert(batch);
+      if (error) return { error: `Doctors were saved but preferences were not: ${error.message}` };
+    }
+  }
+
+  revalidatePath("/", "layout");
+  return { summary: { created: toInsert.length, updated, locationsCreated: missing.length } };
 }
 
 export async function removeDoctor(id: string): Promise<ActionResult> {
@@ -68,6 +250,79 @@ export async function removeDoctor(id: string): Promise<ActionResult> {
   const { error } = await supabase.from("doctors").delete().eq("id", id);
   return error ? fail(error) : done();
 }
+
+// Locations -------------------------------------------------------------------
+
+export async function addLocation(name: string): Promise<ActionResult> {
+  const supabase = await createClient();
+  const { error } = await supabase.from("locations").insert({ name: name.trim() });
+  return error ? fail(error) : done();
+}
+
+export async function renameLocation(id: string, name: string): Promise<ActionResult> {
+  const supabase = await createClient();
+  const { error } = await supabase.from("locations").update({ name: name.trim() }).eq("id", id);
+  return error ? fail(error) : done();
+}
+
+export async function removeLocation(id: string): Promise<ActionResult> {
+  const supabase = await createClient();
+  const { error } = await supabase.from("locations").delete().eq("id", id);
+  return error ? fail(error) : done();
+}
+
+// Shift types -----------------------------------------------------------------
+
+const shiftTypeRow = (t: ShiftTypeInput) => ({
+  name: t.name.trim(),
+  location_id: t.locationId,
+  start_time: t.start,
+  end_time: t.end,
+  ratio: t.ratio,
+  is_night: t.isNight,
+  is_call: t.isCall,
+});
+
+export async function addShiftType(input: ShiftTypeInput): Promise<ActionResult> {
+  const supabase = await createClient();
+  const { error } = await supabase.from("shift_types").insert(shiftTypeRow(input));
+  return error ? fail(error) : done();
+}
+
+export async function updateShiftType(id: string, input: ShiftTypeInput): Promise<ActionResult> {
+  const supabase = await createClient();
+  const { error } = await supabase.from("shift_types").update(shiftTypeRow(input)).eq("id", id);
+  return error ? fail(error) : done();
+}
+
+/** Copies a shift type as "<name> (2)", "(3)", ... so a shift can be listed twice. */
+export async function duplicateShiftType(id: string): Promise<ActionResult> {
+  const supabase = await createClient();
+  const { data: source, error } = await supabase
+    .from("shift_types")
+    .select("name, location_id, start_time, end_time, ratio, is_night, is_call")
+    .eq("id", id)
+    .single();
+  if (error) return fail(error);
+
+  const { data: siblings, error: listError } = await supabase.from("shift_types").select("name");
+  if (listError) return fail(listError);
+  const taken = new Set(siblings.map((s) => s.name.toLowerCase()));
+  const base = source.name.replace(/\s*\(\d+\)$/, "");
+  let n = 2;
+  while (taken.has(`${base} (${n})`.toLowerCase())) n++;
+
+  const { error: insertError } = await supabase.from("shift_types").insert({ ...source, name: `${base} (${n})` });
+  return insertError ? fail(insertError) : done();
+}
+
+export async function removeShiftType(id: string): Promise<ActionResult> {
+  const supabase = await createClient();
+  const { error } = await supabase.from("shift_types").delete().eq("id", id);
+  return error ? fail(error) : done();
+}
+
+// Auth ------------------------------------------------------------------------
 
 export async function signIn(
   _prev: ActionResult | undefined,

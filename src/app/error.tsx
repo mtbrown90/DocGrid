@@ -6,7 +6,8 @@ export default function ErrorPage({ error, reset }: { error: Error; reset: () =>
       <h1 className="text-lg font-semibold">Something went wrong</h1>
       <p className="text-sm">{error.message}</p>
       <p className="text-xs opacity-60">
-        If this mentions a missing table, run supabase/migrations/0001_init.sql in the Supabase SQL
+        If this mentions a missing table or column, a database migration hasn&apos;t been run yet. Run
+        any files in supabase/migrations that you haven&apos;t run, in number order, in the Supabase SQL
         editor.
       </p>
       <button
