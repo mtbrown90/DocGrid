@@ -12,7 +12,7 @@ import {
   type ShiftTypeInput,
 } from "@/app/actions";
 import { fmtHours, fmtRatio, fmtTimeRange, shiftHours } from "@/lib/dates";
-import type { Location, ShiftType } from "@/lib/types";
+import { SHIFT_CATEGORIES, categoryLabel, type Location, type ShiftCategory, type ShiftType } from "@/lib/types";
 import { BTN_DANGER, BTN_GHOST, BTN_PRIMARY, ErrorBox, FIELD, Label, Modal, useAction } from "./ui";
 
 export function SetupManager({ locations, shiftTypes }: { locations: Location[]; shiftTypes: ShiftType[] }) {
@@ -108,7 +108,7 @@ function LocationsSection({ locations, shiftTypes }: { locations: Location[]; sh
 function ShiftTypesSection({ locations, shiftTypes }: { locations: Location[]; shiftTypes: ShiftType[] }) {
   const { pending, error, run } = useAction();
   const [dialog, setDialog] = useState<"new" | ShiftType | null>(null);
-  const locationName = (id: string) => locations.find((l) => l.id === id)?.name ?? "?";
+  const locationName = (id: string | null) => (id ? (locations.find((l) => l.id === id)?.name ?? "?") : "All locations");
 
   return (
     <section className="space-y-3">
@@ -151,7 +151,11 @@ function ShiftTypesSection({ locations, shiftTypes }: { locations: Location[]; s
                   <td className="p-2 font-medium">
                     {t.name}
                     {t.isNight && <span className="ml-1.5 rounded-full bg-indigo-100 px-1.5 py-0.5 text-xs text-indigo-900 dark:bg-indigo-950 dark:text-indigo-100">Night</span>}
-                    {t.isCall && <span className="ml-1.5 rounded-full bg-amber-100 px-1.5 py-0.5 text-xs text-amber-900 dark:bg-amber-950 dark:text-amber-100">Call</span>}
+                    {t.category !== "regular" && (
+                      <span className="ml-1.5 rounded-full bg-amber-100 px-1.5 py-0.5 text-xs text-amber-900 dark:bg-amber-950 dark:text-amber-100">
+                        {categoryLabel(t.category)}
+                      </span>
+                    )}
                   </td>
                   <td className="p-2">{locationName(t.locationId)}</td>
                   <td className="p-2 whitespace-nowrap">{fmtTimeRange(t.start, t.end)}</td>
@@ -210,25 +214,28 @@ function ShiftTypeDialog({
       ? { ...shiftType }
       : {
           name: "",
-          locationId: locations[0]?.id ?? "",
+          locationId: locations[0]?.id ?? null,
           start: "07:00",
           end: "19:00",
           ratio: 1,
           isNight: false,
-          isCall: false,
+          category: "regular",
         },
   );
   const set = <K extends keyof ShiftTypeInput>(key: K, value: ShiftTypeInput[K]) =>
     setForm((f) => ({ ...f, [key]: value }));
 
-  const raw = form.start && form.end && form.start !== form.end ? shiftHours(form.start, form.end) : 0;
+  // Equal start and end means a full 24 hours.
+  const raw = form.start && form.end ? shiftHours(form.start, form.end) : 0;
   const overnight = form.end <= form.start;
 
   function submit(e: React.FormEvent) {
     e.preventDefault();
     if (!form.name.trim()) return setError("Name is required.");
-    if (!form.locationId) return setError("Choose a location.");
-    if (!form.start || !form.end || form.start === form.end) return setError("Start and end times must differ.");
+    if (!form.locationId && form.category !== "call" && form.category !== "aoc") {
+      return setError("Choose a location. Only Call and AOC shifts can cover all locations.");
+    }
+    if (!form.start || !form.end) return setError("Enter a start and end time.");
     run(() => (shiftType ? updateShiftType(shiftType.id, form) : addShiftType(form)), onClose);
   }
 
@@ -239,7 +246,8 @@ function ShiftTypeDialog({
           <input className={FIELD} value={form.name} placeholder="Day, Night, Swing…" onChange={(e) => set("name", e.target.value)} />
         </Label>
         <Label text="Location">
-          <select className={FIELD} value={form.locationId} onChange={(e) => set("locationId", e.target.value)}>
+          <select className={FIELD} value={form.locationId ?? ""} onChange={(e) => set("locationId", e.target.value || null)}>
+            <option value="">All locations (Call/AOC only)</option>
             {locations.map((l) => (
               <option key={l.id} value={l.id}>
                 {l.name}
@@ -269,20 +277,34 @@ function ShiftTypeDialog({
             onChange={(e) => set("ratio", Math.min(999, Math.max(0, Math.round((Number(e.target.value) || 0) * 100000) / 100000)))}
           />
         </Label>
+        <Label text="Category">
+          <select className={FIELD} value={form.category} onChange={(e) => set("category", e.target.value as ShiftCategory)}>
+            {SHIFT_CATEGORIES.map((c) => (
+              <option key={c.value} value={c.value}>
+                {c.label}
+              </option>
+            ))}
+          </select>
+        </Label>
       </div>
+      <p className="text-xs opacity-60">
+        {form.category === "regular" && "A regular shift at one location. It can overlap the doctor's MDOC shift, but nothing else."}
+        {form.category === "call" && "Call shifts can cover all locations. No other shift can overlap a doctor's Call shift."}
+        {form.category === "aoc" && "AOC can cover all locations. No other shift can overlap a doctor's AOC shift."}
+        {form.category === "mdoc" && "MDOC is a 24-hour shift at one location. A doctor can work regular shifts while being MDOC."}
+      </p>
       <p className="rounded-md bg-black/5 px-3 py-2 text-sm dark:bg-white/10">
         {fmtHours(raw)} raw h × {fmtRatio(form.ratio)} = <strong>{fmtHours(raw * form.ratio)} ratio h</strong>
-        {overnight && raw > 0 && <span className="opacity-70"> · ends next day</span>}
+        {form.start === form.end ? (
+          <span className="opacity-70"> · same start and end = 24 hours, ends next day</span>
+        ) : (
+          overnight && <span className="opacity-70"> · ends next day</span>
+        )}
       </p>
       <label className="flex items-center gap-2 text-sm">
         <input type="checkbox" checked={form.isNight} onChange={(e) => set("isNight", e.target.checked)} />
         <span className="font-medium">Night shift</span>
         <span className="opacity-60">(nocturnists work only these)</span>
-      </label>
-      <label className="flex items-center gap-2 text-sm">
-        <input type="checkbox" checked={form.isCall} onChange={(e) => set("isCall", e.target.checked)} />
-        <span className="font-medium">Call shift</span>
-        <span className="opacity-60">(on-call coverage)</span>
       </label>
 
       <ErrorBox message={error} />

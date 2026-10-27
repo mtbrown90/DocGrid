@@ -1,7 +1,7 @@
 import ExcelJS from "exceljs";
 import { fmtTime, fmtWeekday, parseISO } from "./dates";
 import { ratioHours, rawHours } from "./schedule";
-import type { ScheduleData } from "./types";
+import { categoryLabel, type ScheduleData } from "./types";
 
 /**
  * Doctor import/export workbook format.
@@ -25,6 +25,9 @@ export interface ParsedDoctor {
   email: string;
   address: string;
   isNocturnist: boolean;
+  /** Name of the location this doctor is MDOC for, as written in the file; "" if none. */
+  mdocLocation: string;
+  canAoc: boolean;
   /** Location name (as written in the file) -> percent. Only non-zero entries. */
   prefs: { location: string; percent: number }[];
 }
@@ -35,6 +38,9 @@ export interface ParseResult {
   locations: string[];
   /** True when the file has any "% <Location>" column, so blank cells mean "no preference". */
   hasPrefColumns: boolean;
+  /** Whether the file has these columns; if not, existing doctors' values are left alone. */
+  hasMdocColumn: boolean;
+  hasAocColumn: boolean;
   errors: string[];
 }
 
@@ -60,7 +66,14 @@ function parseYesNo(text: string): boolean | null {
 }
 
 export async function parseDoctorWorkbook(data: ArrayBuffer): Promise<ParseResult> {
-  const result: ParseResult = { doctors: [], locations: [], hasPrefColumns: false, errors: [] };
+  const result: ParseResult = {
+    doctors: [],
+    locations: [],
+    hasPrefColumns: false,
+    hasMdocColumn: false,
+    hasAocColumn: false,
+    errors: [],
+  };
 
   const wb = new ExcelJS.Workbook();
   await wb.xlsx.load(data);
@@ -95,6 +108,8 @@ export async function parseDoctorWorkbook(data: ArrayBuffer): Promise<ParseResul
   if (result.errors.length) return result;
 
   result.hasPrefColumns = prefCols.length > 0;
+  result.hasMdocColumn = Boolean(cols["mdoc location"]);
+  result.hasAocColumn = Boolean(cols["can aoc"]);
   const get = (row: ExcelJS.Row, key: string) => (cols[key] ? cellText(row.getCell(cols[key]).value) : "");
 
   const seenIds = new Set<string>();
@@ -120,6 +135,8 @@ export async function parseDoctorWorkbook(data: ArrayBuffer): Promise<ParseResul
 
     const nocturnist = parseYesNo(get(row, "nocturnist"));
     if (nocturnist === null) result.errors.push(`${where}: Nocturnist must be Yes or No.`);
+    const canAoc = parseYesNo(get(row, "can aoc"));
+    if (canAoc === null) result.errors.push(`${where}: Can AOC must be Yes or No.`);
 
     const prefs: ParsedDoctor["prefs"] = [];
     let total = 0;
@@ -148,6 +165,8 @@ export async function parseDoctorWorkbook(data: ArrayBuffer): Promise<ParseResul
       email: get(row, "email"),
       address: get(row, "address"),
       isNocturnist: nocturnist ?? false,
+      mdocLocation: get(row, "mdoc location"),
+      canAoc: canAoc ?? false,
       prefs,
     });
   }
@@ -184,7 +203,7 @@ const cents = (n: number) => Math.round(n * 100) / 100; // sums of 2-decimal val
 export async function buildHoursExport(data: ScheduleData, from: string, to: string): Promise<ArrayBuffer> {
   const wb = new ExcelJS.Workbook();
   const doctors = [...data.doctors].sort((a, b) => a.name.localeCompare(b.name) || a.employeeId.localeCompare(b.employeeId));
-  const locationName = (id: string | null) => data.locations.find((l) => l.id === id)?.name ?? "";
+  const locationName = (id: string | null) => (id ? (data.locations.find((l) => l.id === id)?.name ?? "") : "All locations");
   const typeById = new Map(data.shiftTypes.map((t) => [t.id, t]));
 
   const worked = data.shifts.filter((s) => s.kind === "work" && s.date >= from && s.date <= to);
@@ -235,7 +254,7 @@ export async function buildHoursExport(data: ScheduleData, from: string, to: str
       new Date(Date.UTC(y, m - 1, day)),
       fmtWeekday(parseISO(s.date)),
       s.name,
-      [type?.isNight ? "Night" : "", type?.isCall ? "Call" : ""].filter(Boolean).join(", "),
+      [s.category !== "regular" ? categoryLabel(s.category) : "", type?.isNight ? "Night" : ""].filter(Boolean).join(", "),
       locationName(s.locationId),
       fmtTime(s.start),
       fmtTime(s.end),
@@ -260,7 +279,10 @@ export async function buildDoctorTemplate(locationNames: string[]): Promise<Arra
   const wb = new ExcelJS.Workbook();
 
   const doctors = wb.addWorksheet(DOCTOR_SHEET);
-  const headers = ["ID", "Name", "Specialty", "Phone", "Email", "Address", "Nocturnist", ...locationNames.map((n) => `% ${n}`)];
+  const headers = [
+    "ID", "Name", "Specialty", "Phone", "Email", "Address", "Nocturnist", "MDOC Location", "Can AOC",
+    ...locationNames.map((n) => `% ${n}`),
+  ];
   doctors.addRow(headers).font = { bold: true };
   headers.forEach((h, i) => {
     doctors.getColumn(i + 1).width = Math.max(12, h.length + 4);
@@ -278,6 +300,8 @@ export async function buildDoctorTemplate(locationNames: string[]): Promise<Arra
     "",
     "ID and Name are required. ID must be unique; an existing doctor with the same ID is updated.",
     "Nocturnist: Yes or No.",
+    "MDOC Location: the one location this doctor can be MDOC for (must match a location name). Leave blank if none.",
+    "Can AOC: Yes or No. Any doctor can cover Call shifts, so there is no setting for it.",
     "Each \"% <Location>\" column is the share of that doctor's shifts they would like at that location.",
     "A doctor's percentages must add up to 100. Leave all of them blank for no preference.",
     "To add a new location, add a column headed \"% Location Name\" (or list it on the Locations sheet).",

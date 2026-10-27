@@ -22,6 +22,8 @@ const EMPTY: DoctorInput = {
   email: "",
   address: "",
   isNocturnist: false,
+  mdocLocationId: null,
+  canAoc: false,
 };
 
 export function DoctorsManager({
@@ -77,6 +79,16 @@ export function DoctorsManager({
                   {d.isNocturnist && (
                     <span className="rounded-full bg-indigo-100 px-2 py-0.5 text-xs text-indigo-900 dark:bg-indigo-950 dark:text-indigo-100">
                       Nocturnist
+                    </span>
+                  )}
+                  {d.mdocLocationId && (
+                    <span className="rounded-full bg-amber-100 px-2 py-0.5 text-xs text-amber-900 dark:bg-amber-950 dark:text-amber-100">
+                      MDOC: {locations.find((l) => l.id === d.mdocLocationId)?.name ?? "?"}
+                    </span>
+                  )}
+                  {d.canAoc && (
+                    <span className="rounded-full bg-amber-100 px-2 py-0.5 text-xs text-amber-900 dark:bg-amber-950 dark:text-amber-100">
+                      AOC
                     </span>
                   )}
                 </div>
@@ -146,6 +158,8 @@ function DoctorDialog({
           email: doctor.email,
           address: doctor.address,
           isNocturnist: doctor.isNocturnist,
+          mdocLocationId: doctor.mdocLocationId,
+          canAoc: doctor.canAoc,
         }
       : EMPTY,
   );
@@ -201,6 +215,21 @@ function DoctorDialog({
         <input type="checkbox" checked={form.isNocturnist} onChange={(e) => set("isNocturnist", e.target.checked)} />
         <span className="font-medium">Nocturnist</span>
         <span className="opacity-60">(works night shifts only)</span>
+      </label>
+      <Label text="MDOC location">
+        <select className={FIELD} value={form.mdocLocationId ?? ""} onChange={(e) => set("mdocLocationId", e.target.value || null)}>
+          <option value="">None (not MDOC)</option>
+          {locations.map((l) => (
+            <option key={l.id} value={l.id}>
+              {l.name}
+            </option>
+          ))}
+        </select>
+      </Label>
+      <label className="flex items-center gap-2 text-sm">
+        <input type="checkbox" checked={form.canAoc} onChange={(e) => set("canAoc", e.target.checked)} />
+        <span className="font-medium">Can be AOC</span>
+        <span className="opacity-60">(any doctor can cover Call)</span>
       </label>
 
       <fieldset className="space-y-2 rounded-md border border-black/15 p-3 dark:border-white/20">
@@ -263,7 +292,7 @@ function ImportDialog({ onClose }: { onClose: () => void }) {
   return (
     <Modal title="Import doctors from Excel" onClose={onClose} onSubmit={submit}>
       <p className="text-sm opacity-80">
-        Upload an .xlsx with one row per doctor: ID, Name, Specialty, Phone, Email, Address, Nocturnist, and one &quot;% Location&quot; column per
+        Upload an .xlsx with one row per doctor: ID, Name, Specialty, Phone, Email, Address, Nocturnist, MDOC Location, Can AOC, and one &quot;% Location&quot; column per
         location. Existing doctors with the same ID are updated; nothing is deleted.
       </p>
       <a href="/api/doctors-template" download className="inline-block text-sm font-medium underline">

@@ -14,7 +14,7 @@ import {
   weekDays,
 } from "@/lib/dates";
 import { ratioHours, rawHours, useHydrated } from "@/lib/schedule";
-import { DOCTOR_COLORS, type ScheduleData } from "@/lib/types";
+import { DOCTOR_COLORS, categoryLabel, type ScheduleData } from "@/lib/types";
 import { ExportPanel } from "./ExportPanel";
 import { ShiftDialog, type DialogState } from "./ShiftDialog";
 import { BTN_PRIMARY } from "./ui";
@@ -34,17 +34,11 @@ export function ScheduleBoard({ doctors, shifts, locations, shiftTypes }: Schedu
   const days = weekDays(weekStart);
   const dayISOs = days.map(toISO);
   const todayISO = toISO(new Date());
-  const locationName = (id: string | null) => locations.find((l) => l.id === id)?.name ?? "";
-  const callTypeIds = new Set(shiftTypes.filter((t) => t.isCall).map((t) => t.id));
+  const locationName = (id: string | null) => (id ? (locations.find((l) => l.id === id)?.name ?? "") : "All locations");
 
-  // Doctors working a non-call shift each day; zero means a coverage gap.
+  // Doctors working a regular shift each day (call, AOC and MDOC don't count); zero means a coverage gap.
   const coverage = dayISOs.map(
-    (iso) =>
-      new Set(
-        shifts
-          .filter((s) => s.date === iso && s.kind === "work" && !(s.shiftTypeId && callTypeIds.has(s.shiftTypeId)))
-          .map((s) => s.doctorId),
-      ).size,
+    (iso) => new Set(shifts.filter((s) => s.date === iso && s.category === "regular").map((s) => s.doctorId)).size,
   );
 
   return (
@@ -139,7 +133,14 @@ export function ScheduleBoard({ doctors, shifts, locations, shiftTypes }: Schedu
                                   <span className="font-medium">Time off</span>
                                 ) : (
                                   <>
-                                    <span className="block truncate font-medium">{s.name || "Shift"}</span>
+                                    <span className="block truncate font-medium">
+                                      {s.name || "Shift"}
+                                      {s.category !== "regular" && s.category !== "time-off" && (
+                                        <span className="ml-1 rounded bg-black/10 px-1 text-[10px] uppercase dark:bg-white/15">
+                                          {categoryLabel(s.category)}
+                                        </span>
+                                      )}
+                                    </span>
                                     <span className="block">{fmtTimeRange(s.start, s.end)}</span>
                                     <span className="block truncate opacity-75">
                                       {[locationName(s.locationId), `${fmtHours(rawHours(s))}h`, s.ratio !== 1 ? `×${fmtRatio(s.ratio)}` : ""]

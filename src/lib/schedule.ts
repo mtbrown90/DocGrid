@@ -7,15 +7,26 @@ function interval(s: Pick<Shift, "date" | "start" | "end">): [number, number] {
   return [from, from + durationMinutes(s.start, s.end)];
 }
 
+/**
+ * Whether two shifts of the same doctor may overlap in time. The only allowed
+ * overlap is a Regular shift during an MDOC shift; everything else (including
+ * MDOC vs Call/AOC and anything vs time off) is blocked. Mirrors the database
+ * constraints in supabase/migrations/0007_shift_categories.sql.
+ */
+export function mayOverlap(a: Shift["category"], b: Shift["category"]): boolean {
+  return (a === "regular" && b === "mdoc") || (a === "mdoc" && b === "regular");
+}
+
 /** Returns an existing shift that collides with `candidate` for the same doctor. */
 export function findConflict(
   shifts: Shift[],
-  candidate: Pick<Shift, "doctorId" | "date" | "start" | "end">,
+  candidate: Pick<Shift, "doctorId" | "date" | "start" | "end" | "category">,
   ignoreId?: string,
 ): Shift | undefined {
   const [cFrom, cTo] = interval(candidate);
   return shifts.find((s) => {
     if (s.id === ignoreId || s.doctorId !== candidate.doctorId) return false;
+    if (mayOverlap(s.category, candidate.category)) return false;
     const [from, to] = interval(s);
     return from < cTo && cFrom < to;
   });

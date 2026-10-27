@@ -4,7 +4,7 @@ import { useState } from "react";
 import { addShifts, removeShift, updateShift } from "@/app/actions";
 import { addDays, fmtHours, fmtMonthDay, fmtRatio, fmtTimeRange, parseISO, shiftHours, toISO } from "@/lib/dates";
 import { findConflict } from "@/lib/schedule";
-import type { Doctor, Location, Shift, ShiftType } from "@/lib/types";
+import { categoryLabel, type Doctor, type Location, type Shift, type ShiftType } from "@/lib/types";
 import { BTN_DANGER, BTN_GHOST, BTN_PRIMARY, ErrorBox, FIELD, Label, Modal, useAction } from "./ui";
 
 export type DialogState =
@@ -43,23 +43,24 @@ export function ShiftDialog({
   const [notes, setNotes] = useState(editing?.notes ?? "");
   const [repeatWeeks, setRepeatWeeks] = useState(0);
 
-  const locationName = (id: string | null) => locations.find((l) => l.id === id)?.name ?? "";
+  const locationName = (id: string | null) => (id ? (locations.find((l) => l.id === id)?.name ?? "") : "All locations");
   const chosenType = shiftTypes.find((t) => t.id === typeId);
 
   /** Fields copied onto the shift from whatever was chosen. */
-  function template(): Pick<Shift, "start" | "end" | "kind" | "shiftTypeId" | "locationId" | "name" | "ratio"> | null {
+  function template(): Pick<Shift, "start" | "end" | "kind" | "category" | "shiftTypeId" | "locationId" | "name" | "ratio"> | null {
     if (typeId === TIME_OFF) {
-      return { start: "00:00", end: "23:59", kind: "time-off", shiftTypeId: null, locationId: null, name: "Time off", ratio: 0 };
+      return { start: "00:00", end: "23:59", kind: "time-off", category: "time-off", shiftTypeId: null, locationId: null, name: "Time off", ratio: 0 };
     }
     if (typeId === KEEP && editing) {
-      const { start, end, kind, shiftTypeId, locationId, name, ratio } = editing;
-      return { start, end, kind, shiftTypeId, locationId, name, ratio };
+      const { start, end, kind, category, shiftTypeId, locationId, name, ratio } = editing;
+      return { start, end, kind, category, shiftTypeId, locationId, name, ratio };
     }
     if (!chosenType) return null;
     return {
       start: chosenType.start,
       end: chosenType.end,
       kind: "work",
+      category: chosenType.category,
       shiftTypeId: chosenType.id,
       locationId: chosenType.locationId,
       name: chosenType.name,
@@ -119,6 +120,7 @@ export function ShiftDialog({
             {shiftTypes.map((t) => (
               <option key={t.id} value={t.id}>
                 {t.name} · {locationName(t.locationId)}
+                {t.category !== "regular" ? ` (${categoryLabel(t.category)})` : ""}
               </option>
             ))}
             <option value={TIME_OFF}>Time off</option>

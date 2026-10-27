@@ -8,7 +8,7 @@ import type { Doctor, Shift, ShiftType } from "@/lib/types";
 
 export type ActionResult = { error?: string };
 
-type ShiftDraft = Omit<Shift, "id">;
+type ShiftDraft = Omit<Shift, "id" | "generated">;
 export type DoctorInput = Omit<Doctor, "id" | "color">;
 export type ShiftTypeInput = Omit<ShiftType, "id">;
 
@@ -39,6 +39,7 @@ const shiftRow = (s: ShiftDraft) => ({
   start_time: s.start,
   end_time: s.end,
   kind: s.kind,
+  category: s.category,
   shift_type_id: s.shiftTypeId,
   location_id: s.locationId,
   name: s.name,
@@ -54,7 +55,8 @@ export async function addShifts(drafts: ShiftDraft[]): Promise<ActionResult> {
 
 export async function updateShift(id: string, draft: ShiftDraft): Promise<ActionResult> {
   const supabase = await createClient();
-  const { error } = await supabase.from("shifts").update(shiftRow(draft)).eq("id", id);
+  // Editing a generated shift by hand "locks" it: it is no longer replaced by a regeneration.
+  const { error } = await supabase.from("shifts").update({ ...shiftRow(draft), generated: false }).eq("id", id);
   return error ? fail(error) : done();
 }
 
@@ -62,6 +64,89 @@ export async function removeShift(id: string): Promise<ActionResult> {
   const supabase = await createClient();
   const { error } = await supabase.from("shifts").delete().eq("id", id);
   return error ? fail(error) : done();
+}
+
+// Auto-generated schedules ------------------------------------------------------
+
+export type GeneratedAssignment = { doctorId: string; date: string; shiftTypeId: string };
+export type SaveGeneratedResult = ActionResult & { saved?: number };
+
+const ISO_DATE = /^\d{4}-(0[1-9]|1[0-2])-(0[1-9]|[12]\d|3[01])$/;
+const MAX_GENERATED = 5000;
+
+/**
+ * Saves a generated draft all-or-nothing. Only ids go over the wire; the name,
+ * times, ratio and category are read from the shift types here, so the client
+ * can't hand us different numbers. With `replace`, previously generated shifts
+ * in the range are removed in the same transaction.
+ */
+export async function saveGeneratedSchedule(
+  from: string,
+  to: string,
+  assignments: GeneratedAssignment[],
+  replace: boolean,
+): Promise<SaveGeneratedResult> {
+  if (!ISO_DATE.test(from) || !ISO_DATE.test(to) || from > to) return { error: "Invalid date range." };
+  if (assignments.length > MAX_GENERATED) return { error: `Too many shifts in one save (limit ${MAX_GENERATED}).` };
+  if (assignments.some((a) => !ISO_DATE.test(a.date) || a.date < from || a.date > to)) {
+    return { error: "A shift falls outside the date range." };
+  }
+
+  const supabase = await createClient();
+  const typeIds = [...new Set(assignments.map((a) => a.shiftTypeId))];
+  const { data: types, error: typeError } = typeIds.length
+    ? await supabase.from("shift_types").select("id, name, location_id, start_time, end_time, ratio, category").in("id", typeIds)
+    : { data: [], error: null };
+  if (typeError) return fail(typeError);
+  const byId = new Map(types!.map((t) => [t.id as string, t]));
+
+  const rows = [];
+  for (const a of assignments) {
+    const t = byId.get(a.shiftTypeId);
+    if (!t) return { error: "A shift type used by this draft no longer exists. Generate again." };
+    rows.push({
+      doctor_id: a.doctorId,
+      shift_date: a.date,
+      start_time: t.start_time,
+      end_time: t.end_time,
+      category: t.category,
+      shift_type_id: t.id,
+      location_id: t.location_id,
+      name: t.name,
+      ratio: t.ratio,
+    });
+  }
+
+  const { data, error } = await supabase.rpc("replace_generated_shifts", {
+    p_from: from,
+    p_to: to,
+    p_replace: replace,
+    p_rows: rows,
+  });
+  if (error) {
+    if (error.code === "PGRST202") return { error: "The database is missing migration 0009. Run it in the Supabase SQL editor first." };
+    if (error.code === "23P01") {
+      return { error: "The schedule changed since you generated this draft and a shift now conflicts. Nothing was saved. Generate again." };
+    }
+    return fail(error);
+  }
+  revalidatePath("/", "layout");
+  return { saved: Number(data) };
+}
+
+/** Deletes shifts created by the generator in the range. Shifts entered or edited by hand are kept. */
+export async function deleteGeneratedShifts(from: string, to: string): Promise<SaveGeneratedResult> {
+  if (!ISO_DATE.test(from) || !ISO_DATE.test(to) || from > to) return { error: "Invalid date range." };
+  const supabase = await createClient();
+  const { count, error } = await supabase
+    .from("shifts")
+    .delete({ count: "exact" })
+    .eq("generated", true)
+    .gte("shift_date", from)
+    .lte("shift_date", to);
+  if (error) return fail(error);
+  revalidatePath("/", "layout");
+  return { saved: count ?? 0 };
 }
 
 // Doctors ---------------------------------------------------------------------
@@ -74,6 +159,8 @@ const doctorRow = (d: DoctorInput) => ({
   email: d.email.trim(),
   address: d.address.trim(),
   is_nocturnist: d.isNocturnist,
+  mdoc_location_id: d.mdocLocationId,
+  can_aoc: d.canAoc,
 });
 
 /** Location id -> percent. Zero or missing means no preference for that location. */
@@ -175,6 +262,14 @@ export async function importDoctors(formData: FormData): Promise<ImportResult> {
   if (locError) return { error: locError.message };
   const locationIds = new Map(existingLocations.map((l) => [l.name.toLowerCase(), l.id as string]));
 
+  // MDOC locations must name a location that exists or is listed in the file;
+  // a typo should be reported, not silently create a new location.
+  const known = new Set([...locationIds.keys(), ...parsed.locations.map((n) => n.toLowerCase())]);
+  const unknown = parsed.doctors
+    .filter((d) => d.mdocLocation && !known.has(d.mdocLocation.toLowerCase()))
+    .map((d) => `Doctor ${d.employeeId}: MDOC Location "${d.mdocLocation}" is not a known location.`);
+  if (unknown.length > 0) return { errors: unknown };
+
   const missing = parsed.locations.filter((n) => !locationIds.has(n.toLowerCase()));
   if (missing.length > 0) {
     const { data: created, error } = await supabase.from("locations").insert(missing.map((name) => ({ name }))).select("id, name");
@@ -203,10 +298,19 @@ export async function importDoctors(formData: FormData): Promise<ImportResult> {
       email: d.email,
       address: d.address,
       isNocturnist: d.isNocturnist,
+      mdocLocationId: d.mdocLocation ? (locationIds.get(d.mdocLocation.toLowerCase()) ?? null) : null,
+      canAoc: d.canAoc,
     });
     const existingId = doctorIds.get(d.employeeId.toLowerCase());
     if (existingId) {
-      const { error } = await supabase.from("doctors").update(row).eq("id", existingId);
+      // Leave MDOC location / AOC alone when the file doesn't have those columns.
+      const { mdoc_location_id, can_aoc, ...rest } = row;
+      const patch = {
+        ...rest,
+        ...(parsed.hasMdocColumn && { mdoc_location_id }),
+        ...(parsed.hasAocColumn && { can_aoc }),
+      };
+      const { error } = await supabase.from("doctors").update(patch).eq("id", existingId);
       if (error) return { error: `Stopped at ${d.employeeId}: ${fail(error).error}` };
       finalIds.set(d.employeeId.toLowerCase(), existingId);
       updated++;
@@ -280,7 +384,7 @@ const shiftTypeRow = (t: ShiftTypeInput) => ({
   end_time: t.end,
   ratio: t.ratio,
   is_night: t.isNight,
-  is_call: t.isCall,
+  category: t.category,
 });
 
 export async function addShiftType(input: ShiftTypeInput): Promise<ActionResult> {
@@ -300,7 +404,7 @@ export async function duplicateShiftType(id: string): Promise<ActionResult> {
   const supabase = await createClient();
   const { data: source, error } = await supabase
     .from("shift_types")
-    .select("name, location_id, start_time, end_time, ratio, is_night, is_call")
+    .select("name, location_id, start_time, end_time, ratio, is_night, category")
     .eq("id", id)
     .single();
   if (error) return fail(error);
