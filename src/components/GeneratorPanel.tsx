@@ -5,7 +5,7 @@ import { useState } from "react";
 import { deleteGeneratedShifts, saveGeneratedSchedule } from "@/app/actions";
 import { fmtHours, fmtMonthDay, fmtTimeRange, parseISO, toISO } from "@/lib/dates";
 import { PREF_STRENGTHS, generateSchedule, type GenerateResult, type PrefStrength } from "@/lib/generator";
-import { useHydrated } from "@/lib/schedule";
+import { useHydrated } from "@/lib/useHydrated";
 import { categoryLabel, type ScheduleData } from "@/lib/types";
 import { BTN_DANGER, BTN_GHOST, BTN_PRIMARY, ErrorBox, FIELD, Label, useAction } from "./ui";
 

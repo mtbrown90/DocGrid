@@ -1,4 +1,3 @@
-import { useSyncExternalStore } from "react";
 import { absMinutes, durationMinutes, shiftHours, trunc2 } from "./dates";
 import type { Shift } from "./types";
 
@@ -40,13 +39,4 @@ export function rawHours(s: Pick<Shift, "kind" | "start" | "end">): number {
 /** Exact raw hours times the shift's ratio, truncated to 2 decimals. */
 export function ratioHours(s: Pick<Shift, "kind" | "start" | "end" | "ratio">): number {
   return s.kind === "time-off" ? 0 : trunc2(shiftHours(s.start, s.end) * s.ratio);
-}
-
-/** False during server render and hydration, true afterwards. */
-export function useHydrated(): boolean {
-  return useSyncExternalStore(
-    () => () => {},
-    () => true,
-    () => false,
-  );
 }

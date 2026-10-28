@@ -68,6 +68,21 @@ export function fmtTimeRange(start: string, end: string): string {
   return `${fmtTime(start)}–${fmtTime(end)}`;
 }
 
+/** Compact time for tight spaces: "07:00" -> "7a", "19:30" -> "7:30p". */
+export function fmtTimeShort(t: string): string {
+  const [h, m] = t.split(":").map(Number);
+  const hour = h % 12 === 0 ? 12 : h % 12;
+  return `${hour}${m ? `:${pad(m)}` : ""}${h >= 12 ? "p" : "a"}`;
+}
+
+export function fmtTimeRangeShort(start: string, end: string): string {
+  return `${fmtTimeShort(start)}–${fmtTimeShort(end)}`;
+}
+
+export function fmtMonthYear(d: Date): string {
+  return d.toLocaleDateString("en-US", { month: "long", year: "numeric" });
+}
+
 /** Length of a shift in minutes; end <= start means it ends the next day. */
 export function durationMinutes(start: string, end: string): number {
   const s = timeToMinutes(start);
